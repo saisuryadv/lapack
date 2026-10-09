@@ -1,0 +1,99 @@
+name: Debug
+
+on:
+  push:
+    branches:
+    - ci-debug
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  debug:
+    name: ${{ matrix.toolchain.os }}-${{ matrix.toolchain.FC }}
+    runs-on: ${{ matrix.toolchain.os }}
+
+    env:
+      FC: ${{ matrix.toolchain.FC }}
+      CC: ${{ matrix.toolchain.CC }}
+      FFLAGS: "-Wall -pedantic -Wno-unused-dummy-argument -Wno-unused-variable -Wno-unused-label"
+      CFLAGS: "-Wall -pedantic"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+        - FC: gfortran
+          CC: gcc
+          os: ubuntu-26.04
+        - FC: gfortran
+          CC: gcc
+          os: ubuntu-26.04-arm
+        - FC: gfortran-14
+          CC: gcc-14
+          os: macos-26
+
+    steps:
+    - name: Checkout LAPACK
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Versions
+      run: |
+        ${FC} --version
+        cmake --version
+        echo "::notice title=fc::$(${FC} --version | head -1)"
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -G Ninja \
+          -D CMAKE_BUILD_TYPE=Release \
+          -D CMAKE_Fortran_COMPILER="${FC}" \
+          -D CMAKE_C_COMPILER="${CC}" \
+          -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/lapack_install \
+          -D CBLAS:BOOL=ON \
+          -D LAPACKE:BOOL=ON \
+          -D BUILD_TESTING:BOOL=ON \
+          -D LAPACKE_WITH_TMG:BOOL=ON \
+          -D BUILD_SHARED_LIBS:BOOL=OFF
+
+    - name: Build
+      run: cmake --build build --parallel
+
+    - name: Test
+      working-directory: ${{ github.workspace }}/build
+      run: |
+        ctest -C Release --schedule-random --output-on-failure --timeout 1800 --parallel 2>&1 | tee ctest.out
+        exit "${PIPESTATUS[0]}"
+
+    - name: Diagnose
+      if: ${{ !cancelled() }}
+      working-directory: ${{ github.workspace }}/build
+      run: |
+        python3 - <<'EOF'
+        import re, glob
+        out = []
+        s = open('ctest.out', errors='replace').read()
+        i = s.find('The following tests FAILED')
+        out.append(s[i:i+1500] if i >= 0 else 'no FAILED list; tail:\n' + s[-600:])
+        for f in sorted(glob.glob('TESTING/*.out')):
+            t = open(f, errors='replace').read()
+            bad = [l for l in t.splitlines()
+                   if re.search(r'fail|error|\*\*\*|backtrace|signal|INFO *=', l, re.I)
+                   and 'passed' not in l.lower() and 'ERROR SUMMARY' not in l]
+            if bad:
+                out.append(f + ' (%d lines)\n' % len(bad) + '\n'.join(bad[:60]))
+        for f in sorted(glob.glob('TESTING/*.err')):
+            t = open(f, errors='replace').read().strip()
+            if t:
+                out.append(f + '\n' + t[:1500])
+        txt = '\n----\n'.join(out)
+        open('diag.txt', 'w').write(txt)
+        for k in range(0, min(len(txt), 36000), 3600):
+            chunk = txt[k:k+3600].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+            print('::warning title=diag%02d::%s' % (k // 3600, chunk))
+        EOF
+        echo "diag.txt: $(wc -c < diag.txt) bytes"
