@@ -29,7 +29,13 @@ jobs:
         toolchain:
         - FC: gfortran
           CC: gcc
+          os: ubuntu-26.04
+        - FC: gfortran
+          CC: gcc
           os: ubuntu-26.04-arm
+        - FC: gfortran-14
+          CC: gcc-14
+          os: macos-26
 
     steps:
     - name: Checkout LAPACK
