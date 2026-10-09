@@ -221,13 +221,8 @@ else()
   set(ZXLINTST ${ZLINTST_NO_XBLAS})
 endif()
 
-# Disable constant propagation for NAG compiler to avoid issues with
-# creating NaN values in the CXX error-exit tests.
-if(CMAKE_Fortran_COMPILER_ID STREQUAL "NAG")
-  set_source_files_properties(
-    serrcxx.f cerrcxx.f derrcxx.f zerrcxx.f
-    PROPERTIES COMPILE_OPTIONS "-Onopropagate")
-endif()
+lapack_nag_disable_constant_propagation(
+  serrcxx.f cerrcxx.f derrcxx.f zerrcxx.f)
 
 set(DSLINTST dchkab.f
 	ddrvab.f ddrvac.f derrab.f derrac.f dget08.f
@@ -268,30 +263,21 @@ function(add_lin_executable name)
 
   if(BUILD_DEFAULT_API)
     add_executable(${name} ${sources})
-    target_link_libraries(${name} ${TMGLIB} ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+    target_link_libraries(${name} PRIVATE ${TMGLIB} ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+    lapack_add_coverage(${name})
   endif()
 
   if(BUILD_INDEX64_EXT_API)
     include(ExtendedAPIHelpers)
     generate_64bit_suffixed_sources(${name} ext_sources ext_sources_64)
-
-    # Disable constant propagation for NAG compiler to avoid issues with
-    # creating NaN values in the CXX error-exit tests.
-    if(CMAKE_Fortran_COMPILER_ID STREQUAL "NAG")
-      foreach(source IN LISTS ext_sources_64)
-        get_filename_component(source_name "${source}" NAME)
-        if(source_name MATCHES "^[scdz]errcxx_64\\.f$")
-          set_source_files_properties(
-            "${source}" PROPERTIES COMPILE_OPTIONS "-Onopropagate")
-        endif()
-      endforeach()
-    endif()
+    lapack_nag_disable_constant_propagation(${ext_sources_64})
 
     add_executable(${name}_64 ${ext_sources_64})
     target_compile_options(${name}_64 PRIVATE ${FOPT_ILP64})
-    target_link_libraries(${name}_64 ${TMGLIB} ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+    target_link_libraries(${name}_64 PRIVATE ${TMGLIB} ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+    lapack_add_coverage(${name}_64)
 
-    # Add depedency to the global codegen target. Since we reuse the same
+    # Add dependency to the global codegen target. Since we reuse the same
     # generated source file for multiple tests, the generation could be
     # triggered by multiple targets when building in parallel.
     add_dependencies(${name}_64 64bit_codegen)
@@ -337,3 +323,29 @@ endif()
 if(BUILD_COMPLEX AND BUILD_COMPLEX16)
   add_lin_executable(xlintstzc SOURCES ${ZCLINTST})
 endif()
+
+# Source lists for the LIN tests LAPACKE/testing rebuilds with the routine
+# calls routed through LAPACKE, one per precision. The paths must be
+# absolute: generate_suffixed_sources resolves relative source names against
+# the directory that calls it. A list is empty when that precision cannot be
+# built, which is how LAPACKE/testing decides what to build.
+foreach(_spec
+    "S;SINGLE;SLINTST;SCLNTST;SLINTST_NO_XBLAS"
+    "D;DOUBLE;DLINTST;DZLNTST;DLINTST_NO_XBLAS"
+    "C;COMPLEX;CLINTST;SCLNTST;CLINTST_NO_XBLAS"
+    "Z;COMPLEX16;ZLINTST;DZLNTST;ZLINTST_NO_XBLAS")
+  list(GET _spec 0 _prec)
+  list(GET _spec 1 _build)
+  list(GET _spec 2 _lin)
+  list(GET _spec 3 _aux)
+  list(GET _spec 4 _no_xblas)
+
+  set(_sources)
+  if(LAPACKE AND BUILD_${_build} AND LAPACKE_BUILD_${_build})
+    foreach(_source IN LISTS ALINTST ${_lin} ${_aux} ${_no_xblas})
+      list(APPEND _sources "${CMAKE_CURRENT_SOURCE_DIR}/${_source}")
+    endforeach()
+  endif()
+  set(LAPACKE_TEST_LIN_${_prec}_SOURCES "${_sources}" CACHE INTERNAL
+    "LIN test sources rerouted through LAPACKE (${_prec}, absolute paths)")
+endforeach()

@@ -59,6 +59,7 @@
       INTEGER            NIDMAX, NALMAX, NBEMAX
       PARAMETER          ( NIDMAX = 9, NALMAX = 7, NBEMAX = 7 )
 *     .. Local Scalars ..
+      DOUBLE PRECISION   S1, S2
       DOUBLE PRECISION   EPS, ERR, THRESH
       INTEGER            I, ISNUM, J, N, NALF, NBET, NIDIM, NTRA,
      $                    LAYOUT
@@ -104,6 +105,7 @@
      $                   'cblas_dskewsymm  ',
      $                   'cblas_dskewsyr2k '/
 *     .. Executable Statements ..
+      CALL CPU_TIME( S1 )
 *
 *     Read name and unit number for summary output file and open file.
 *
@@ -200,7 +202,7 @@
      $      GO TO 50
    40 CONTINUE
       WRITE( NOUT, FMT = 9990 )SNAMET
-      STOP
+      STOP 1
    50 LTEST( I ) = LTESTT
       GO TO 30
 *
@@ -243,7 +245,7 @@
       SAME = LDE( CC, CT, N )
       IF( .NOT.SAME.OR.ERR.NE.ZERO )THEN
          WRITE( NOUT, FMT = 9989 )TRANSA, TRANSB, SAME, ERR
-         STOP
+         STOP 1
       END IF
       TRANSB = 'T'
       CALL DMMCH( TRANSA, TRANSB, N, 1, N, ONE, AB, NMAX,
@@ -252,7 +254,7 @@
       SAME = LDE( CC, CT, N )
       IF( .NOT.SAME.OR.ERR.NE.ZERO )THEN
          WRITE( NOUT, FMT = 9989 )TRANSA, TRANSB, SAME, ERR
-         STOP
+         STOP 1
       END IF
       DO 120 J = 1, N
          AB( J, NMAX + 1 ) = N - J + 1
@@ -270,7 +272,7 @@
       SAME = LDE( CC, CT, N )
       IF( .NOT.SAME.OR.ERR.NE.ZERO )THEN
          WRITE( NOUT, FMT = 9989 )TRANSA, TRANSB, SAME, ERR
-         STOP
+         STOP 1
       END IF
       TRANSB = 'T'
       CALL DMMCH( TRANSA, TRANSB, N, 1, N, ONE, AB, NMAX,
@@ -279,7 +281,7 @@
       SAME = LDE( CC, CT, N )
       IF( .NOT.SAME.OR.ERR.NE.ZERO )THEN
          WRITE( NOUT, FMT = 9989 )TRANSA, TRANSB, SAME, ERR
-         STOP
+         STOP 1
       END IF
 *
 *     Test each subroutine in turn.
@@ -404,6 +406,8 @@
   230 CONTINUE
       IF( TRACE )
      $   CLOSE ( NTRA )
+      CALL CPU_TIME( S2 )
+      WRITE( NOUT, FMT = 9983 )S2 - S1
       CLOSE ( NOUT )
       STOP
 *
@@ -436,6 +440,7 @@
  9986 FORMAT( /' END OF TESTS' )
  9985 FORMAT( /' ******* FATAL ERROR - TESTS ABANDONED *******' )
  9984 FORMAT( ' ERROR-EXITS WILL NOT BE TESTED' )
+ 9983 FORMAT( ' Total time used = ', F12.2, ' seconds', / )
 *
 *     End of DBLAT3.
 *

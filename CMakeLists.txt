@@ -50,12 +50,36 @@ if(_is_coverage_build)
   find_package(codecov)
 endif()
 
-# Use valgrind if it is found
-option( LAPACK_TESTING_USE_PYTHON "Use Python for testing. Disable it on memory checks." ON )
-find_program( MEMORYCHECK_COMMAND valgrind )
-if( MEMORYCHECK_COMMAND )
-  message( STATUS "Found valgrind: ${MEMORYCHECK_COMMAND}" )
-  set( MEMORYCHECK_COMMAND_OPTIONS "--leak-check=full --show-leak-kinds=all --track-origins=yes" )
+# Instrument the library ${lib} for coverage.
+function(lapack_add_coverage lib)
+  if(NOT _is_coverage_build)
+    return()
+  endif()
+  if(NOT TARGET ${lib})
+    message(FATAL_ERROR "lapack_add_coverage: no such target '${lib}'")
+  endif()
+  add_coverage(${lib})
+  target_link_libraries(${lib} PRIVATE gcov)
+endfunction()
+
+set(LAPACK_TESTING_JUNIT_JOB_ID "" CACHE STRING
+  "Identifier of the job running the tests, prefixed to the JUnit report's names." )
+mark_as_advanced(LAPACK_TESTING_JUNIT_JOB_ID)
+
+option(LAPACK_TESTING_USE_PYTHON "Use Python for testing. Disable it on memory checks." ON)
+option(LAPACK_MEMORY_CHECK "Configure the test suite for valgrind memory checking" OFF)
+if(LAPACK_MEMORY_CHECK)
+  find_program(MEMORYCHECK_COMMAND valgrind REQUIRED)
+  message(STATUS "Memory checking with valgrind: ${MEMORYCHECK_COMMAND}")
+  set(MEMORYCHECK_COMMAND_OPTIONS "--leak-check=full --show-leak-kinds=definite,indirect --track-origins=yes --trace-children=yes")
+
+  # The Python summary is a test of its own, so the memory check would run the
+  # interpreter under valgrind and report on that rather than on LAPACK.
+  if(LAPACK_TESTING_USE_PYTHON)
+    message(STATUS "Memory checking: forcing LAPACK_TESTING_USE_PYTHON to OFF")
+    set(LAPACK_TESTING_USE_PYTHON OFF CACHE BOOL
+      "Use Python for testing. Disable it on memory checks." FORCE)
+  endif()
 endif()
 
 # By default test Fortran compiler complex abs and complex division
@@ -141,12 +165,6 @@ if(APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-flat_namespace")
     set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-flat_namespace")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-flat_namespace")
-  else()
-    if(BUILD_SHARED_LIBS AND BUILD_TESTING)
-      message(WARNING
-        "LAPACK test suite might fail with shared libraries and the default two-level namespace. "
-        "Disable shared libraries or enable flat namespace for symbol resolution via -DUSE_FLAT_NAMESPACE=ON.")
-    endif()
   endif()
 endif()
 
@@ -174,6 +192,7 @@ set(PKG_CONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 # Testing
 option(BUILD_TESTING "Build tests" ${_is_coverage_build})
 include(CTest)
+include(LAPACKTestHelpers)
 message(STATUS "Build tests: ${BUILD_TESTING}")
 
 if(BUILD_TESTING)
@@ -347,10 +366,6 @@ else()
   add_link_options(${LAPACK_LINKER_FLAGS})
 endif()
 
-if(BUILD_TESTING)
-  add_subdirectory(TESTING)
-endif()
-
 # --------------------------------------------------
 # LAPACKE
 option(LAPACKE "Build LAPACKE" OFF)
@@ -360,6 +375,15 @@ option(LAPACKE "Build LAPACKE" OFF)
 option(LAPACKE_WITH_TMG "Build LAPACKE with tmglib routines" OFF)
 if(LAPACKE_WITH_TMG)
   set(LAPACKE ON)
+endif()
+
+option(LAPACKE_BUILD_SINGLE "Build LAPACKE single precision real" ON)
+option(LAPACKE_BUILD_DOUBLE "Build LAPACKE double precision real" ON)
+option(LAPACKE_BUILD_COMPLEX "Build LAPACKE single precision complex" ON)
+option(LAPACKE_BUILD_COMPLEX16 "Build LAPACKE double precision complex" ON)
+
+if(BUILD_TESTING)
+  add_subdirectory(TESTING)
 endif()
 
 # TMGLIB
@@ -385,14 +409,60 @@ endif()
 set(LAPACK_INSTALL_EXPORT_NAME ${LAPACK_INSTALL_EXPORT_NAME_CACHE})
 unset(LAPACK_INSTALL_EXPORT_NAME_CACHE)
 
-
-#-------------------------------------
-# LAPACKE
 # Include lapack.h and lapacke_mangling.h even if LAPACKE is not built
 add_subdirectory(LAPACKE/include)
 
 if(LAPACKE)
   add_subdirectory(LAPACKE)
+endif()
+
+#-------------------------------------
+# Test summary
+#
+# The summary parses the .out files the LAPACK, LAPACKE, BLAS and CBLAS
+# drivers leave behind, so it has to run after all of them. set_property(TEST)
+# only reaches tests added in the calling directory, hence the top level.
+if(BUILD_TESTING AND Python3_EXECUTABLE AND LAPACK_TESTING_USE_PYTHON)
+  message(STATUS "Enabling LAPACK test summary (see TESTING/testing_results.txt and lapack_testing_junit.xml)")
+
+  # Every test registered anywhere below the source root, so that adding a
+  # test directory never needs a matching edit here. Collected before the
+  # summary itself is added, so that it does not depend on itself.
+  function(_collect_tests dir out)
+    get_property(_tests DIRECTORY "${dir}" PROPERTY TESTS)
+    get_property(_subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdir IN LISTS _subdirs)
+      _collect_tests("${_subdir}" _subdir_tests)
+      list(APPEND _tests ${_subdir_tests})
+    endforeach()
+    set(${out} "${_tests}" PARENT_SCOPE)
+  endfunction()
+
+  _collect_tests("${LAPACK_SOURCE_DIR}" _all_tests)
+
+  # Without a job identifier the report keeps the plain suite and class names.
+  set(_summary_job_option "")
+  if(LAPACK_TESTING_JUNIT_JOB_ID)
+    set(_summary_job_option "--junit-job" "${LAPACK_TESTING_JUNIT_JOB_ID}")
+  endif()
+
+  file(COPY ${LAPACK_SOURCE_DIR}/lapack_testing.py DESTINATION ${LAPACK_BINARY_DIR})
+  # The test drivers report a numerical failure in their output and still exit
+  # with a status of 0, so this is the test that fails the run when one of them
+  # found something: --fail-on-error turns any failure or error they reported
+  # into a nonzero exit status of the summary.
+  add_test(
+    NAME LAPACK_Test_Summary
+    WORKING_DIRECTORY ${LAPACK_BINARY_DIR}
+    COMMAND ${Python3_EXECUTABLE} "lapack_testing.py"
+      "--fail-on-error" "--fail-if-empty" "--fail-on-empty-output"
+      "--fail-on-unrecognized" "--merge-apis"
+      "--junit-xml" "lapack_testing_junit.xml" ${_summary_job_option}
+    )
+
+  if(_all_tests)
+    set_property(TEST LAPACK_Test_Summary APPEND PROPERTY DEPENDS ${_all_tests})
+  endif()
 endif()
 
 

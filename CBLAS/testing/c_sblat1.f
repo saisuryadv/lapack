@@ -13,6 +13,7 @@
       INTEGER          ICASE, INCX, INCY, MODE, N
       LOGICAL          PASS
 *     .. Local Scalars ..
+      REAL             S1, S2
       REAL             SFAC
       INTEGER          IC
 *     .. External Subroutines ..
@@ -24,6 +25,7 @@
 *     .. Data statements ..
       DATA             SFAC/9.765625E-4/
 *     .. Executable Statements ..
+      CALL CPU_TIME( S1 )
       WRITE (NOUT,99999)
       DO 20 IC = 1, 11
          ICASE = IC
@@ -55,12 +57,15 @@
          IF (PASS) WRITE (NOUT,99998)
          WRITE (NOUT,99997) SUBNAM, NTESTS, NFAILS
    20 CONTINUE
+      CALL CPU_TIME( S2 )
+      WRITE (NOUT,99996) S2 - S1
       STOP
 *
 99999 FORMAT (' Real CBLAS Test Program Results',/1X)
 99998 FORMAT ('                                    ----- PASS -----')
 99997 FORMAT (1X,A15,' COMPUTATIONAL TESTS:',I9,' RUN,',I9,
      +        ' FAILED')
+99996 FORMAT (' Total time used = ',F12.2,' seconds',/)
       END
 
 *  =====================================================================
@@ -157,7 +162,7 @@
             CALL STEST1(SS,DS1(K),DS1(K),SFAC)
          ELSE
             WRITE (NOUT,*) ' Shouldn''t be here in CHECK0'
-            STOP
+            STOP 1
          END IF
    20 CONTINUE
    40 RETURN
@@ -253,7 +258,7 @@
                CALL ITEST1(ISAMAXTEST(N,SX,INCX),ITRUE2(NP1))
             ELSE
                WRITE (NOUT,*) ' Shouldn''t be here in CHECK1'
-               STOP
+               STOP 1
             END IF
    60    CONTINUE
    80 CONTINUE
@@ -440,7 +445,7 @@
                CALL STEST(LENY,SY,STY,SSIZE2(1,1),1.0E0)
             ELSE
                WRITE (NOUT,*) ' Shouldn''t be here in CHECK2'
-               STOP
+               STOP 1
             END IF
   100    CONTINUE
   120 CONTINUE
@@ -555,7 +560,7 @@
                CALL STEST(LENY,SY,STY,SSIZE2(1,KSIZE),SFAC)
             ELSE
                WRITE (NOUT,*) ' Shouldn''t be here in CHECK3'
-               STOP
+               STOP 1
             END IF
    40    CONTINUE
    60 CONTINUE

@@ -123,6 +123,7 @@
       PARAMETER          ( NINMAX = 7, NIDMAX = 9, NKBMAX = 7,
      $                   NALMAX = 7, NBEMAX = 7 )
 *     .. Local Scalars ..
+      REAL               S1, S2
       REAL               EPS, ERR, THRESH
       INTEGER            I, ISNUM, J, N, NALF, NBET, NIDIM, NINC, NKB,
      $                   NOUT, NTRA
@@ -165,6 +166,7 @@
      $                   'CGERU ', 'CHER  ', 'CHPR  ', 'CHER2 ',
      $                   'CHPR2 '/
 *     .. Executable Statements ..
+      CALL CPU_TIME( S1 )
 *
 *     Read name and unit number for summary output file and open file.
 *
@@ -275,7 +277,7 @@
      $      GO TO 70
    60 CONTINUE
       WRITE( NOUT, FMT = 9986 )SNAMET
-      STOP
+      STOP 1
    70 LTEST( I ) = LTESTT
       GO TO 50
 *
@@ -309,7 +311,7 @@
       SAME = LCE( YY, YT, N )
       IF( .NOT.SAME.OR.ERR.NE.RZERO )THEN
          WRITE( NOUT, FMT = 9985 )TRANS, SAME, ERR
-         STOP
+         STOP 1
       END IF
       TRANS = 'T'
       CALL CMVCH( TRANS, N, N, ONE, A, NMAX, X, -1, ZERO, Y, -1, YT, G,
@@ -317,7 +319,7 @@
       SAME = LCE( YY, YT, N )
       IF( .NOT.SAME.OR.ERR.NE.RZERO )THEN
          WRITE( NOUT, FMT = 9985 )TRANS, SAME, ERR
-         STOP
+         STOP 1
       END IF
 *
 *     Test each subroutine in turn.
@@ -394,6 +396,8 @@
   240 CONTINUE
       IF( TRACE )
      $   CLOSE ( NTRA )
+      CALL CPU_TIME( S2 )
+      WRITE( NOUT, FMT = 9979 )S2 - S1
       CLOSE ( NOUT )
       STOP
 *
@@ -429,6 +433,7 @@
  9982 FORMAT( /' END OF TESTS' )
  9981 FORMAT( /' ******* FATAL ERROR - TESTS ABANDONED *******' )
  9980 FORMAT( ' ERROR-EXITS WILL NOT BE TESTED' )
+ 9979 FORMAT( ' Total time used = ', F12.2, ' seconds', / )
 *
 *     End of CBLAT2
 *

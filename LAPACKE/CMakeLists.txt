@@ -18,11 +18,6 @@ include_directories(${LAPACK_BINARY_DIR}/include include)
 add_subdirectory(src)
 add_subdirectory(utils)
 
-option(LAPACKE_BUILD_SINGLE "Build LAPACKE single precision real" ON)
-option(LAPACKE_BUILD_DOUBLE "Build LAPACKE double precision real" ON)
-option(LAPACKE_BUILD_COMPLEX "Build LAPACKE single precision complex" ON)
-option(LAPACKE_BUILD_COMPLEX16 "Build LAPACKE double precision complex" ON)
-
 foreach(precision SINGLE DOUBLE COMPLEX COMPLEX16)
   if(LAPACKE_BUILD_${precision} AND NOT BUILD_${precision})
     message(
@@ -87,6 +82,7 @@ if(BUILD_DEFAULT_API)
 else()
   add_library(${LAPACKELIB}_obj OBJECT ${COMMON_SOURCES} ${COMMON_UTILS})
 endif()
+lapack_add_coverage(${LAPACKELIB}_obj)
 
 if(BUILD_INDEX64_EXT_API)
   add_library(${LAPACKELIB}_64_obj OBJECT ${SOURCES})
@@ -114,10 +110,12 @@ if(LAPACKE_WITH_TMG)
 endif()
 target_link_libraries(${LAPACKELIB} PRIVATE ${LAPACK_LIBRARIES})
 
+lapack_add_coverage(${LAPACKELIB})
 lapack_install_library(${LAPACKELIB})
 
 if(BUILD_TESTING)
   add_subdirectory(example)
+  add_subdirectory(testing)
 endif()
 
 

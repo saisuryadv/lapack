@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Summarize (and optionally run) the LAPACK, BLAS and CBLAS test suites.
+"""Summarize (and optionally run) the LAPACK, LAPACKE, BLAS and CBLAS test
+suites.
 
 This script analyzes the ``.out`` files written by the LAPACK testing
 drivers (``xlintst*``, ``xeigtst*`` and ``xdmdeigtst*``) and prints a
@@ -7,10 +8,14 @@ summary table of the number of tests run and the number of failures per
 precision (s/d/c/z).  With ``--run`` it executes the testing drivers
 first and then analyzes their output.
 
-The BLAS (``xblat[123]?``) and CBLAS (``x?cblat[123]``) test drivers are
-analyzed too, from their own testing directories, and are reported in
-their own summary sections.  Those drivers report their test counts in
-lines of the form::
+The LAPACKE (``xlintst?_{work,high}_{cm,rm}``), BLAS (``xblat[123]?``)
+and CBLAS (``x?cblat[123]``) test drivers are analyzed too, from their
+own testing directories, and are reported in their own summary
+sections.  The LAPACKE drivers are the linear equation tests rebuilt
+with the routine calls routed through LAPACKE, one driver per precision
+and (API layer, matrix layout) flavor; their output uses the classic
+LAPACK summary format.  The BLAS and CBLAS drivers report their test
+counts in lines of the form::
 
      SGEMV      COMPUTATIONAL TESTS:     3456 RUN,        0 FAILED
      SGEMV      ERROR-EXIT TESTS:           6 RUN,        0 FAILED
@@ -43,6 +48,11 @@ Examples:
     ./lapack_testing.py -s --junit-xml results.xml
         Print only the summary table and also write a JUnit XML report
         of the analyzed output files, e.g. for GitLab CI test reports.
+
+    ./lapack_testing.py --junit-xml results.xml --junit-job linux-gfortran
+        Write a JUnit XML report whose suite and class names carry the
+        name of the job that ran the tests, so that the reports of
+        several jobs stay apart where they are collected.
 
     ./lapack_testing.py -s --markdown summary.md
         Print only the summary table and also write a GitHub-flavored
@@ -133,23 +143,45 @@ BLAS_LEVELS: "Tuple[Tuple[int, str], ...]" = (
     (3, "Level 3 BLAS routines"),
 )
 
+# LAPACKE linear equation test flavors: (layer, layout, description).
+# The double precision LIN tests are rebuilt with allowlisted routine
+# calls routed through LAPACKE, once per (API layer, matrix layout)
+# combination; only the work/column-major flavor runs the error-exit
+# tests, so the other flavors read a generated input with those disabled.
+LAPACKE_FLAVORS: "Tuple[Tuple[str, str, str], ...]" = (
+    ("work", "cm", "column-major work-level API"),
+    ("work", "rm", "row-major work-level API"),
+    ("high", "cm", "column-major high-level API"),
+    ("high", "rm", "row-major high-level API"),
+)
+
 # Libraries, in reporting order.  Each has its own testing directory and
 # its own section in the summary table.
 LIBRARY_LAPACK = "LAPACK"
+LIBRARY_LAPACKE = "LAPACKE"
 LIBRARY_BLAS = "BLAS"
 LIBRARY_CBLAS = "CBLAS"
-LIBRARIES: "Tuple[str, ...]" = (LIBRARY_LAPACK, LIBRARY_BLAS, LIBRARY_CBLAS)
+LIBRARIES: "Tuple[str, ...]" = (
+    LIBRARY_LAPACK,
+    LIBRARY_LAPACKE,
+    LIBRARY_BLAS,
+    LIBRARY_CBLAS,
+)
 
 # LAPACK test families, in reporting order per precision.
 LAPACK_FAMILIES: "Tuple[str, ...]" = ("eig",) + tuple(s[0] for s in LIN_SETS) + ("dmd",)
 
 # All test families, in reporting order per precision.
-ALL_FAMILIES: "Tuple[str, ...]" = LAPACK_FAMILIES + ("blas", "cblas")
+ALL_FAMILIES: "Tuple[str, ...]" = LAPACK_FAMILIES + ("lapacke", "blas", "cblas")
 
 # Which library each family belongs to.
 FAMILY_LIBRARY: "Dict[str, str]" = dict(
     [(family, LIBRARY_LAPACK) for family in LAPACK_FAMILIES]
-    + [("blas", LIBRARY_BLAS), ("cblas", LIBRARY_CBLAS)]
+    + [
+        ("lapacke", LIBRARY_LAPACKE),
+        ("blas", LIBRARY_BLAS),
+        ("cblas", LIBRARY_CBLAS),
+    ]
 )
 
 # API suffixes that may exist: default API and index-64 extended API.
@@ -162,6 +194,14 @@ RESULTS_FILENAME = "testing_results.txt"
 #   "  XYZ:  ddd out of  ddd tests failed to pass the threshold"
 RE_TESTS_RUN = re.compile(r"(\d+)\s+tests run\)")
 RE_TESTS_FAILED = re.compile(r"(\d+)\s+out of\s+(\d+)")
+
+# Footer printed by every test driver, e.g.
+#   " Total time used =        48.32 seconds"
+# This is the time the driver measured itself, so it is available even
+# when this script only analyzes output files it did not run.  The
+# format is F12.2, which prints asterisks on overflow; such a line
+# simply does not match and the case is then reported without a time.
+RE_TOTAL_TIME = re.compile(r"Total time used\s*=\s*(\d+\.?\d*)\s*seconds")
 
 # Failure records printed by the eigencondition checkers (schkec.f and
 # friends), e.g. " Error in STRSYL: RMAX =..." — one per failing routine.
@@ -294,6 +334,10 @@ class FileReport:
 
     counts: Counts = field(default_factory=Counts)
     notable_lines: "List[str]" = field(default_factory=list)
+    # Run time in seconds as reported by the driver in its footer, or
+    # None for a run that never reached that footer and for output of a
+    # build whose drivers do not print one.
+    elapsed: "Optional[float]" = None
 
 
 @dataclass
@@ -341,6 +385,10 @@ class TestCase:
     # False when the driver opens its own output file, so the harness must
     # not also redirect standard output onto it.
     redirect_stdout: bool = True
+    # The tracked source-tree file a generated input is derived from, used
+    # for the JUnit 'file' attribute; None when input_name itself is a
+    # source-tree file.
+    source_input: "Optional[str]" = None
 
     def suffixed_output(self, suffix: str) -> str:
         """Return the output file name for an API suffix.
@@ -398,6 +446,12 @@ class CaseOutcome:
     run_error: "Optional[str]" = None
     report: "Optional[FileReport]" = None
     duration: "Optional[float]" = None
+    # When the run behind this outcome took place, in seconds since the
+    # epoch: the wall-clock start of the driver under ``--run``,
+    # otherwise the modification time of the output file, which is when
+    # the driver that wrote it finished.  None when there is no output
+    # file to go by.
+    started: "Optional[float]" = None
 
 
 def build_test_cases(letters: str, families: "Sequence[str]") -> "List[TestCase]":
@@ -406,8 +460,8 @@ def build_test_cases(letters: str, families: "Sequence[str]") -> "List[TestCase]
     Args:
         letters: Precision letters to include, in order (subset of
             ``"sdcz"``).
-        families: Test families to include (subset of ``lin``, ``eig``,
-            ``mixed``, ``rfp``, ``dmd``).
+        families: Test families to include (a subset of
+            ``ALL_FAMILIES``).
 
     Returns:
         The test cases in reporting order: for each precision, the
@@ -473,6 +527,33 @@ def build_test_cases(letters: str, families: "Sequence[str]") -> "List[TestCase]
                     parser=PARSER_DMD,
                 )
             )
+        if "lapacke" in families:
+            # All flavors of a driver read <x>test.in except that the
+            # flavors that cannot run the error-exit tests read the
+            # generated <x>test_noerr.in, which only exists in the build
+            # tree.
+            for layer, layout, flavor in LAPACKE_FLAVORS:
+                error_exits = layer == "work" and layout == "cm"
+                cases.append(
+                    TestCase(
+                        precision=letter,
+                        family="lapacke",
+                        description="Linear Equation routines via the "
+                        + flavor,
+                        input_name="{}test.in".format(letter)
+                        if error_exits
+                        else "{}test_noerr.in".format(letter),
+                        output_name="{}test_{}_{}.out".format(letter, layer, layout),
+                        source_input=None
+                        if error_exits
+                        else "{}test.in".format(letter),
+                        executable="xlintst{}_{}_{}".format(
+                            letter, layer, layout
+                        ),
+                        parser=PARSER_STANDARD,
+                        library=LIBRARY_LAPACKE,
+                    )
+                )
         if "blas" in families:
             for level, description in BLAS_LEVELS:
                 # Level 1 reads no input; Level 2/3 read e.g. sblat2.in,
@@ -740,6 +821,26 @@ def parse_blas(lines: "Sequence[str]", level_one: bool) -> FileReport:
     return report
 
 
+def parse_elapsed(lines: "Sequence[str]") -> "Optional[float]":
+    """Return the run time the driver reported in its footer.
+
+    Args:
+        lines: The lines of the output file.
+
+    Returns:
+        The run time in seconds, or None when the output carries no
+        readable ``Total time used`` line.  The drivers print the line
+        once, in their footer; should an output carry several, the last
+        one wins.
+    """
+    elapsed: "Optional[float]" = None
+    for line in lines:
+        match = RE_TOTAL_TIME.search(line)
+        if match:
+            elapsed = float(match.group(1))
+    return elapsed
+
+
 def parse_lines(parser: str, lines: "Sequence[str]") -> FileReport:
     """Parse test output lines with the parser kind of a test case.
 
@@ -749,15 +850,21 @@ def parse_lines(parser: str, lines: "Sequence[str]") -> FileReport:
         lines: The lines of the output file.
 
     Returns:
-        The counts and the notable (error) lines of the file.
+        The counts, the notable (error) lines and the reported run time
+        of the file.
     """
     if parser == PARSER_BALANCE:
-        return parse_balance(lines)
-    if parser == PARSER_DMD:
-        return parse_dmd(lines)
-    if parser in (PARSER_BLAS1, PARSER_BLAS23):
-        return parse_blas(lines, level_one=parser == PARSER_BLAS1)
-    return parse_standard(lines)
+        report = parse_balance(lines)
+    elif parser == PARSER_DMD:
+        report = parse_dmd(lines)
+    elif parser in (PARSER_BLAS1, PARSER_BLAS23):
+        report = parse_blas(lines, level_one=parser == PARSER_BLAS1)
+    else:
+        report = parse_standard(lines)
+    # The footer is formatted the same way by every driver that prints
+    # one at all, so it is read here rather than in each parser.
+    report.elapsed = parse_elapsed(lines)
+    return report
 
 
 def find_unrecognized_outputs(directories: "Dict[str, Path]") -> "List[str]":
@@ -851,6 +958,7 @@ def find_executable(name: str, bin_dir: "Optional[str]") -> "Optional[Path]":
 
 SOURCE_INPUT_DIRS: "Dict[str, str]" = {
     LIBRARY_LAPACK: "TESTING",
+    LIBRARY_LAPACKE: "TESTING",
     LIBRARY_BLAS: "BLAS/TESTING",
     LIBRARY_CBLAS: "CBLAS/testing",
 }
@@ -1142,7 +1250,87 @@ def counts_message(counts: Counts) -> str:
     return ", ".join(parts)
 
 
-def junit_testcase(outcome: CaseOutcome) -> "ET.Element":
+def case_time(outcome: CaseOutcome) -> "Optional[float]":
+    """Return the run time to report for one test case.
+
+    Args:
+        outcome: The analysis outcome of the test case.
+
+    Returns:
+        The wall-clock time of the driver run when this script ran it
+        itself, otherwise the time the driver reported in its output,
+        or None when neither is available.
+    """
+    if outcome.duration is not None:
+        return outcome.duration
+    if outcome.report is not None:
+        return outcome.report.elapsed
+    return None
+
+
+def junit_timestamp(seconds: float) -> str:
+    """Format a point in time for a JUnit ``timestamp`` attribute.
+
+    Local time without a UTC offset, as in the Ant convention that the
+    JUnit XML dialects follow.
+
+    Args:
+        seconds: The point in time, in seconds since the epoch.
+
+    Returns:
+        The time as ``YYYY-MM-DDThh:mm:ss``.
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds))
+
+
+def output_mtime(path: Path) -> "Optional[float]":
+    """Return the modification time of a test output file.
+
+    Args:
+        path: The output file to inspect.
+
+    Returns:
+        The modification time in seconds since the epoch, or None when
+        the file cannot be stat'ed.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def junit_scoped_name(job: "Optional[str]", name: str, separator: str) -> str:
+    """Prefix a JUnit name with the identifier of the job that ran it.
+
+    The same test suite is run by many CI jobs, and a report collector
+    that gathers all of them keys a test case on its suite, class and
+    test name alone.  Without the job in those names the reports of the
+    jobs collapse onto one another; with it they stay apart, and a
+    failure names the job it came from.
+
+    Args:
+        job: The job identifier passed to ``--junit-job``, or None when
+            the report is not scoped to a job.
+        name: The name to prefix.
+        separator: What to put between the two: ``"."`` for the dotted
+            class names, which also replaces any dot in ``job``,
+            ``" / "`` for the free-text suite names.
+
+    Returns:
+        The prefixed name, or the name unchanged when there is no job.
+    """
+    if not job:
+        return name
+    if separator == ".":
+        # A dotted name is read as a path, one package or class per
+        # segment.  Job identifiers carry the runner image version
+        # ("ubuntu-26.04-gfortran-shared"), so left alone their dots
+        # would split one job across two levels of that hierarchy.
+        job = job.replace(".", "_")
+    return "{}{}{}".format(job, separator, name)
+
+
+def junit_testcase(outcome: CaseOutcome, job: "Optional[str]" = None) -> "ET.Element":
     """Build the JUnit ``<testcase>`` element of one analyzed test case.
 
     The element carries at most one status child: an ``<error>`` when
@@ -1157,6 +1345,7 @@ def junit_testcase(outcome: CaseOutcome) -> "ET.Element":
 
     Args:
         outcome: The analysis outcome of the test case.
+        job: The job identifier to prefix to the class name, or None.
 
     Returns:
         The ``<testcase>`` element.
@@ -1165,7 +1354,11 @@ def junit_testcase(outcome: CaseOutcome) -> "ET.Element":
     element = ET.Element(
         "testcase",
         {
-            "classname": "{}{}.{}".format(case.library, outcome.suffix, case.family),
+            "classname": junit_scoped_name(
+                job,
+                "{}{}.{}".format(case.library, outcome.suffix, case.family),
+                ".",
+            ),
             "name": "{} ({} {})".format(
                 case.suffixed_output(outcome.suffix),
                 PRECISION_NAMES[case.precision],
@@ -1174,15 +1367,22 @@ def junit_testcase(outcome: CaseOutcome) -> "ET.Element":
         },
     )
     if case.input_name is not None:
-        # The source-tree input file, as a repository-relative path.
+        # The source-tree input file, as a repository-relative path.  A
+        # generated input has no source-tree counterpart, so its testcase
+        # points at the tracked file it is derived from.
         element.set(
-            "file", "{}/{}".format(SOURCE_INPUT_DIRS[case.library], case.input_name)
+            "file",
+            "{}/{}".format(
+                SOURCE_INPUT_DIRS[case.library],
+                case.source_input or case.input_name,
+            ),
         )
     report = outcome.report
     if report is not None:
         element.set("assertions", str(report.counts.runs))
-    if outcome.duration is not None:
-        element.set("time", "{:.3f}".format(outcome.duration))
+    duration = case_time(outcome)
+    if duration is not None:
+        element.set("time", "{:.3f}".format(duration))
 
     details: "List[str]" = []
     if outcome.run_error is not None:
@@ -1213,7 +1413,9 @@ def junit_testcase(outcome: CaseOutcome) -> "ET.Element":
 
 
 def build_junit_tree(
-    outcomes: "Sequence[CaseOutcome]", unrecognized: "Sequence[str]"
+    outcomes: "Sequence[CaseOutcome]",
+    unrecognized: "Sequence[str]",
+    job: "Optional[str]" = None,
 ) -> "ET.ElementTree":
     """Build the JUnit XML document for the analyzed test cases.
 
@@ -1224,14 +1426,35 @@ def build_junit_tree(
     that the report does not look clean while ``--fail-on-unrecognized``
     fails the run.
 
+    Every suite and the document itself carry the totals of their test
+    cases: ``tests``, ``failures``, ``errors``, ``skipped``, the number
+    of individual test results behind them (``assertions``) and their
+    summed run time (``time``).  A case whose time is unknown — a
+    missing output file, or a run that never reached its footer —
+    contributes nothing to the sum rather than a zero, and a suite
+    without a single timed case carries no ``time`` at all.
+
+    Every suite also carries a ``timestamp`` of when it ran: the
+    earliest start among its cases, which is when this script launched
+    the first of them under ``--run`` and otherwise how old the oldest
+    of their output files is.  A suite none of whose cases left an
+    output file behind falls back to the time the report was built, so
+    that the attribute is always present.
+
+    A job identifier prefixes every suite and class name, so that the
+    reports of the CI jobs that all run this one test suite do not
+    collapse onto one another where they are collected.
+
     Args:
         outcomes: The analysis outcomes, in analysis order.
         unrecognized: The names of the unrecognized ``.out`` files.
+        job: The job identifier to prefix to the names, or None.
 
     Returns:
         The document; its root is a ``<testsuites>`` element.
     """
     root = ET.Element("testsuites", {"name": "lapack_testing"})
+    report_time = time.time()
     grouped: "Dict[Tuple[str, str], List[CaseOutcome]]" = {}
     for outcome in outcomes:
         grouped.setdefault((outcome.case.library, outcome.suffix), []).append(outcome)
@@ -1240,17 +1463,27 @@ def build_junit_tree(
     total_failures = 0
     total_errors = 0
     total_skipped = 0
+    total_assertions = 0
+    total_time = 0.0
+    total_timed = False
     for (library, suffix), suite_outcomes in grouped.items():
+        starts = [o.started for o in suite_outcomes if o.started is not None]
         suite = ET.SubElement(
-            root, "testsuite", {"name": section_title(library, [suffix])}
+            root,
+            "testsuite",
+            {
+                "name": junit_scoped_name(job, section_title(library, [suffix]), " / "),
+                "timestamp": junit_timestamp(min(starts) if starts else report_time),
+            },
         )
         failures = 0
         errors = 0
         skipped = 0
+        assertions = 0
         suite_time = 0.0
         timed = False
         for outcome in suite_outcomes:
-            element = junit_testcase(outcome)
+            element = junit_testcase(outcome, job)
             suite.append(element)
             if element.find("failure") is not None:
                 failures += 1
@@ -1258,40 +1491,56 @@ def build_junit_tree(
                 errors += 1
             elif element.find("skipped") is not None:
                 skipped += 1
-            if outcome.duration is not None:
-                suite_time += outcome.duration
+            if outcome.report is not None:
+                assertions += outcome.report.counts.runs
+            duration = case_time(outcome)
+            if duration is not None:
+                suite_time += duration
                 timed = True
         suite.set("tests", str(len(suite_outcomes)))
         suite.set("failures", str(failures))
         suite.set("errors", str(errors))
         suite.set("skipped", str(skipped))
+        suite.set("assertions", str(assertions))
         if timed:
             suite.set("time", "{:.3f}".format(suite_time))
         total_tests += len(suite_outcomes)
         total_failures += failures
         total_errors += errors
         total_skipped += skipped
+        total_assertions += assertions
+        total_time += suite_time
+        total_timed = total_timed or timed
 
     if unrecognized:
         message = (
             "{} .out file(s) in the testing directories are not known to "
             "this script and were not analyzed".format(len(unrecognized))
         )
+        # This suite is a check this script makes rather than a driver it
+        # timed, so its run time is a true zero rather than an unknown.
         suite = ET.SubElement(
             root,
             "testsuite",
             {
-                "name": "lapack_testing.py",
+                "name": junit_scoped_name(job, "lapack_testing.py", " / "),
+                "timestamp": junit_timestamp(report_time),
                 "tests": "1",
                 "failures": "1",
                 "errors": "0",
                 "skipped": "0",
+                "assertions": "0",
+                "time": "0.000",
             },
         )
         testcase = ET.SubElement(
             suite,
             "testcase",
-            {"classname": "lapack_testing", "name": "unrecognized .out files"},
+            {
+                "classname": junit_scoped_name(job, "lapack_testing", "."),
+                "name": "unrecognized .out files",
+                "time": "0.000",
+            },
         )
         failure = ET.SubElement(testcase, "failure")
         failure.set("message", sanitize_xml_text(message))
@@ -1303,11 +1552,17 @@ def build_junit_tree(
     root.set("failures", str(total_failures))
     root.set("errors", str(total_errors))
     root.set("skipped", str(total_skipped))
+    root.set("assertions", str(total_assertions))
+    if total_timed:
+        root.set("time", "{:.3f}".format(total_time))
     return ET.ElementTree(root)
 
 
 def write_junit_xml(
-    path: Path, outcomes: "Sequence[CaseOutcome]", unrecognized: "Sequence[str]"
+    path: Path,
+    outcomes: "Sequence[CaseOutcome]",
+    unrecognized: "Sequence[str]",
+    job: "Optional[str]" = None,
 ) -> "Optional[str]":
     """Write the JUnit XML report requested via ``--junit-xml``.
 
@@ -1320,6 +1575,7 @@ def write_junit_xml(
             are created.
         outcomes: The analysis outcomes, in analysis order.
         unrecognized: The names of the unrecognized ``.out`` files.
+        job: The job identifier to prefix to the names, or None.
 
     Returns:
         An error message if the report could not be written, otherwise
@@ -1328,7 +1584,7 @@ def write_junit_xml(
     # Path.with_name below would raise ValueError for such a path.
     if not path.name:
         return "cannot write {}: the path has no file name".format(path)
-    tree = build_junit_tree(outcomes, unrecognized)
+    tree = build_junit_tree(outcomes, unrecognized, job)
     # ET.indent is Python 3.9+; without it the report is one long line,
     # which every consumer accepts just the same.
     indent = getattr(ET, "indent", None)
@@ -1699,8 +1955,8 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
         The parsed arguments.
     """
     parser = argparse.ArgumentParser(
-        description="Analyze the .out files produced by the LAPACK, BLAS "
-        "and CBLAS test suites and print a summary of the test results.",
+        description="Analyze the .out files produced by the LAPACK, LAPACKE, "
+        "BLAS and CBLAS test suites and print a summary of the test results.",
         epilog="By default all precisions and all test families are "
         "analyzed, each library is reported in its own section, and both "
         "the default API and extended API (_64) outputs are summarized "
@@ -1712,6 +1968,12 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
         default="TESTING",
         help="directory containing the LAPACK testing output (.out) files "
         "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lapacke-dir",
+        default=str(Path("TESTING") / "lapacke"),
+        help="directory containing the LAPACKE testing output (.out) files; "
+        "skipped without warning if it does not exist (default: %(default)s)",
     )
     parser.add_argument(
         "--blas-dir",
@@ -1775,7 +2037,8 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
         default="all",
         help="test family to analyze: lin=linear equations, "
         "eig=eigenproblems (including balancing), mixed=mixed precision, "
-        "rfp=RFP format, dmd=dynamic mode decomposition, blas=BLAS, "
+        "rfp=RFP format, dmd=dynamic mode decomposition, "
+        "lapacke=linear equations via LAPACKE, blas=BLAS, "
         "cblas=CBLAS, lapack=all LAPACK families, all (default)",
     )
     parser.add_argument(
@@ -1804,6 +2067,16 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
         "reports; written regardless of the display and --fail-* options",
     )
     parser.add_argument(
+        "--junit-job",
+        metavar="NAME",
+        default=None,
+        help="identifier of the job that produced the results, e.g. the "
+        "name or the Codecov flag of a CI job; it is prefixed to the suite "
+        "and class names of the --junit-xml report, so that the reports of "
+        "the jobs that all run this one test suite stay apart where they "
+        "are collected",
+    )
+    parser.add_argument(
         "--markdown",
         metavar="PATH",
         default=None,
@@ -1823,7 +2096,14 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
     parser.add_argument(
         "--fail-if-empty",
         action="store_true",
-        help="exit with a nonzero status if no test results were analyzed",
+        help="exit with a nonzero status if no test results were analyzed "
+        "at all",
+    )
+    parser.add_argument(
+        "--fail-on-empty-output",
+        action="store_true",
+        help="exit with a nonzero status if any analyzed output file "
+        "accounted for no tests at all",
     )
     parser.add_argument(
         "--fail-on-unrecognized",
@@ -1835,17 +2115,17 @@ def parse_args(argv: "Optional[Sequence[str]]" = None) -> argparse.Namespace:
 
 
 def main(argv: "Optional[Sequence[str]]" = None) -> int:
-    """Run the LAPACK, BLAS and CBLAS test summary tool.
+    """Run the LAPACK, LAPACKE, BLAS and CBLAS test summary tool.
 
     Args:
         argv: The command line arguments, or None to use ``sys.argv``.
 
     Returns:
         int: The process exit status. This is 2 for usage errors, 1 if a
-        condition requested via ``--fail-on-error``, ``--fail-if-empty``
-        or ``--fail-on-unrecognized`` occurred or a report requested via
-        ``--junit-xml`` or ``--markdown`` could not be written, and 0
-        otherwise.
+        condition requested via ``--fail-on-error``, ``--fail-if-empty``,
+        ``--fail-on-empty-output`` or ``--fail-on-unrecognized`` occurred
+        or a report requested via ``--junit-xml`` or ``--markdown``
+        could not be written, and 0 otherwise.
     """
     args = parse_args(argv)
     short_summary: bool = args.short or args.number
@@ -1859,12 +2139,14 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
         )
         return 2
 
-    # The BLAS tests are absent from builds that use an optimized BLAS,
-    # and CBLAS is off by default, so a missing directory is normal and
-    # is skipped silently.  An explicitly selected library that has no
-    # directory is a usage error, though.
+    # The LAPACKE tests are built only with LAPACKE=ON, the BLAS tests
+    # are absent from builds that use an optimized BLAS, and CBLAS is off
+    # by default, so a missing directory is normal and is skipped
+    # silently.  An explicitly selected library that has no directory is
+    # a usage error, though.
     directories: "Dict[str, Path]" = {LIBRARY_LAPACK: test_dir}
     for library, option in (
+        (LIBRARY_LAPACKE, args.lapacke_dir),
         (LIBRARY_BLAS, args.blas_dir),
         (LIBRARY_CBLAS, args.cblas_dir),
     ):
@@ -1989,6 +2271,7 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
                 output_name = case.suffixed_output(suffix)
                 run_error: "Optional[str]" = None
                 duration: "Optional[float]" = None
+                started: "Optional[float]" = None
                 if not just_errors and not short_summary:
                     print(
                         "Testing {} '{}' ({})".format(
@@ -1997,6 +2280,7 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
                         end=" ",
                     )
                 if args.run:
+                    started = time.time()
                     start = time.monotonic()
                     run_error = run_test_case(case, suffix, directory, args.bin)
                     duration = time.monotonic() - start
@@ -2017,8 +2301,10 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
                                 output_name
                             )
                         )
+                    if started is None:
+                        started = output_mtime(directory / output_name)
                     outcomes.append(
-                        CaseOutcome(case, suffix, run_error, None, duration)
+                        CaseOutcome(case, suffix, run_error, None, duration, started)
                     )
                     missing_files += 1
                     if not short_summary:
@@ -2039,8 +2325,12 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
                     ),
                     lines,
                 )
+                if started is None:
+                    started = output_mtime(directory / output_name)
                 report = parse_lines(case.parser, lines)
-                outcomes.append(CaseOutcome(case, suffix, run_error, report, duration))
+                outcomes.append(
+                    CaseOutcome(case, suffix, run_error, report, duration, started)
+                )
                 precision_total.add(report.counts)
                 result.case_counts[case.output_name] = report.counts
 
@@ -2143,6 +2433,28 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
             file=sys.stderr,
         )
 
+    # A file that parses but accounts for no tests at all means a driver
+    # wrote its header and then ran nothing, which is what happens when
+    # its input file stops lining up with what it reads.  Neither of the
+    # other checks notices: such a driver exits with status 0, and its
+    # sibling files keep the grand total nonzero.
+    empty_outputs = [
+        outcome
+        for outcome in outcomes
+        if outcome.report is not None and outcome.report.counts.runs == 0
+    ]
+    if empty_outputs:
+        print(
+            "lapack_testing.py: {} output file(s) accounted for no tests at "
+            "all:".format(len(empty_outputs)),
+            file=sys.stderr,
+        )
+        for outcome in empty_outputs:
+            print(
+                "  {}".format(outcome.case.suffixed_output(outcome.suffix)),
+                file=sys.stderr,
+            )
+
     unrecognized = find_unrecognized_outputs(directories)
     if unrecognized:
         print(
@@ -2159,7 +2471,9 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
 
     junit_error: "Optional[str]" = None
     if args.junit_xml is not None:
-        junit_error = write_junit_xml(Path(args.junit_xml), outcomes, unrecognized)
+        junit_error = write_junit_xml(
+            Path(args.junit_xml), outcomes, unrecognized, args.junit_job
+        )
         if junit_error is not None:
             print("lapack_testing.py: {}".format(junit_error), file=sys.stderr)
 
@@ -2177,6 +2491,8 @@ def main(argv: "Optional[Sequence[str]]" = None) -> int:
             print("lapack_testing.py: {}".format(markdown_error), file=sys.stderr)
 
     if args.fail_if_empty and grand_total.runs == 0:
+        return 1
+    if args.fail_on_empty_output and empty_outputs:
         return 1
     if args.fail_on_unrecognized and unrecognized:
         return 1
