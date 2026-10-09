@@ -20,35 +20,62 @@ jobs:
     env:
       FC: ${{ matrix.toolchain.FC }}
       CC: ${{ matrix.toolchain.CC }}
-      FFLAGS: "-Wall -pedantic -Wno-unused-dummy-argument -Wno-unused-variable -Wno-unused-label"
+      FFLAGS: ${{ matrix.toolchain.FFLAGS }}
       CFLAGS: "-Wall -pedantic"
 
     strategy:
       fail-fast: false
       matrix:
         toolchain:
+        - FC: flang
+          CC: clang
+          os: ubuntu-26.04
+          FFLAGS: "-Wall -pedantic"
+        - FC: ifx
+          CC: icx
+          os: ubuntu-24.04
+          FFLAGS: "-Wall -pedantic -warn nounused"
         - FC: gfortran
           CC: gcc
           os: ubuntu-26.04
-        - FC: gfortran
-          CC: gcc
-          os: ubuntu-26.04-arm
-        - FC: gfortran-14
-          CC: gcc-14
-          os: macos-26
+          FFLAGS: "-Wall -pedantic -Wno-unused-dummy-argument -Wno-unused-variable -Wno-unused-label"
 
     steps:
     - name: Checkout LAPACK
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+    - name: Install flang 21 and clang 21
+      if: ${{ matrix.toolchain.FC == 'flang' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y flang-21 clang-21
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-21 100
+        sudo update-alternatives --install /usr/bin/flang flang /usr/bin/flang-21 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-21 100
+
+    - name: Install the Intel oneAPI compilers
+      if: ${{ matrix.toolchain.FC == 'ifx' }}
+      run: |
+        curl -fsSL https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+          | gpg --dearmor \
+          | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+        echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg]" \
+             "https://apt.repos.intel.com/oneapi all main" \
+          | sudo tee /etc/apt/sources.list.d/oneAPI.list > /dev/null
+        sudo apt-get update
+        sudo apt-get install -y intel-oneapi-compiler-fortran intel-oneapi-compiler-dpcpp-cpp
+        echo "TOOLCHAIN_SETUP=/opt/intel/oneapi/setvars.sh" >> "$GITHUB_ENV"
+
     - name: Versions
       run: |
+        [ -z "${TOOLCHAIN_SETUP-}" ] || source "${TOOLCHAIN_SETUP}"
         ${FC} --version
         cmake --version
         echo "::notice title=fc::$(${FC} --version | head -1)"
 
     - name: Configure CMake
       run: |
+        [ -z "${TOOLCHAIN_SETUP-}" ] || source "${TOOLCHAIN_SETUP}"
         cmake -B build -G Ninja \
           -D CMAKE_BUILD_TYPE=Release \
           -D CMAKE_Fortran_COMPILER="${FC}" \
@@ -61,11 +88,14 @@ jobs:
           -D BUILD_SHARED_LIBS:BOOL=OFF
 
     - name: Build
-      run: cmake --build build --parallel
+      run: |
+        [ -z "${TOOLCHAIN_SETUP-}" ] || source "${TOOLCHAIN_SETUP}"
+        cmake --build build --parallel
 
     - name: Test
       working-directory: ${{ github.workspace }}/build
       run: |
+        [ -z "${TOOLCHAIN_SETUP-}" ] || source "${TOOLCHAIN_SETUP}"
         ctest -C Release --schedule-random --output-on-failure --timeout 1800 --parallel 2>&1 | tee ctest.out
         exit "${PIPESTATUS[0]}"
 
