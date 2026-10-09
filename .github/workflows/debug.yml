@@ -29,13 +29,7 @@ jobs:
         toolchain:
         - FC: gfortran
           CC: gcc
-          os: ubuntu-26.04
-        - FC: gfortran
-          CC: gcc
           os: ubuntu-26.04-arm
-        - FC: gfortran-14
-          CC: gcc-14
-          os: macos-26
 
     steps:
     - name: Checkout LAPACK
@@ -79,10 +73,10 @@ jobs:
         s = open('ctest.out', errors='replace').read()
         i = s.find('The following tests FAILED')
         out.append(s[i:i+1500] if i >= 0 else 'no FAILED list; tail:\n' + s[-600:])
-        for f in sorted(glob.glob('TESTING/*.out')):
+        for f in sorted(glob.glob('TESTING/?svd*.out')):
             t = open(f, errors='replace').read()
             bad = [l for l in t.splitlines()
-                   if re.search(r'fail|error|\*\*\*|backtrace|signal|INFO *=', l, re.I)
+                   if re.search(r'fail|error|\*\*\*|backtrace|signal|INFO *=|test *\(|\bM *= *\d|\bN *= *\d|type|seed|ratio', l, re.I)
                    and 'passed' not in l.lower() and 'ERROR SUMMARY' not in l]
             if bad:
                 out.append(f + ' (%d lines)\n' % len(bad) + '\n'.join(bad[:60]))
